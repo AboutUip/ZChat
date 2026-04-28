@@ -78,6 +78,8 @@
     <string name="features_friend_requests">好友申请</string>
     <string name="add_friend_title">添加好友</string>
     <string name="add_friend_target_hint">对方账户 ID（32 位十六进制）</string>
+    <string name="add_friend_search">查询</string>
+    <string name="add_friend_user_found">用户：%1$s</string>
     <string name="add_friend_send">发送申请</string>
     <string name="add_friend_ok">好友申请已发送</string>
     <string name="add_friend_duplicate_pending">已向该用户发送过申请，对方尚未处理，请耐心等待。</string>

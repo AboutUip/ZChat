@@ -3,6 +3,7 @@ package com.kite.zchat;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
@@ -16,6 +17,7 @@ import com.kite.zchat.auth.AuthCredentialStore;
 import com.kite.zchat.friends.FriendIdentityStore;
 import com.kite.zchat.friends.FriendSigning;
 import com.kite.zchat.friends.FriendZspHelper;
+import com.kite.zchat.zsp.ZspProfileCodec;
 import com.kite.zchat.zsp.ZspSessionManager;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
@@ -32,8 +34,13 @@ public final class AddFriendActivity extends AppCompatActivity {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
     private TextInputEditText targetInput;
+    private MaterialButton searchBtn;
     private MaterialButton sendBtn;
+    private TextView resultName;
     private ProgressBar progress;
+
+    private byte[] searchedTargetId;
+    private String searchedTargetName;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -44,25 +51,76 @@ public final class AddFriendActivity extends AppCompatActivity {
         toolbar.setNavigationOnClickListener(v -> finish());
 
         targetInput = findViewById(R.id.addFriendTargetHex);
+        searchBtn = findViewById(R.id.addFriendSearch);
         sendBtn = findViewById(R.id.addFriendSend);
+        resultName = findViewById(R.id.addFriendResultName);
         progress = findViewById(R.id.addFriendProgress);
 
         String host = getIntent().getStringExtra(EXTRA_HOST);
         int port = getIntent().getIntExtra(EXTRA_PORT, 0);
 
-        sendBtn.setOnClickListener(
-                v -> {
-                    String hex = targetInput.getText() != null ? targetInput.getText().toString().trim() : "";
-                    io.execute(() -> runSend(host, port, hex));
-                });
+        searchBtn.setOnClickListener(v -> {
+            String hex = targetInput.getText() != null ? targetInput.getText().toString().trim() : "";
+            io.execute(() -> runSearch(host, port, hex));
+        });
+
+        sendBtn.setOnClickListener(v -> {
+            if (searchedTargetId == null) return;
+            io.execute(() -> runSend(host, port, searchedTargetId, searchedTargetName));
+        });
     }
 
-    private void runSend(String host, int port, String targetHex) {
-        postUi(
-                () -> {
-                    progress.setVisibility(View.VISIBLE);
-                    sendBtn.setEnabled(false);
-                });
+    private void runSearch(String host, int port, String targetHex) {
+        postUi(() -> {
+            progress.setVisibility(View.VISIBLE);
+            searchBtn.setEnabled(false);
+            sendBtn.setEnabled(false);
+            resultName.setVisibility(View.GONE);
+        });
+        try {
+            byte[] to = AuthCredentialStore.hexToBytes(targetHex);
+            if (to.length != 16) {
+                postUi(() ->
+                        Toast.makeText(this, R.string.error_user_id_hex, Toast.LENGTH_SHORT).show());
+                return;
+            }
+            AuthCredentialStore creds = AuthCredentialStore.create(this);
+            byte[] from = creds.getUserIdBytes();
+            if (Arrays.equals(from, to)) {
+                postUi(() ->
+                        Toast.makeText(this, R.string.error_user_id_hex, Toast.LENGTH_SHORT).show());
+                return;
+            }
+            if (!FriendZspHelper.ensureSession(this, host, port)) {
+                postUi(this::toastFailed);
+                return;
+            }
+            ZspProfileCodec.UserProfile profile = ZspSessionManager.get().userProfileGet(to);
+            String name = profile.nicknameUtf8;
+            if (name == null || name.isEmpty()) {
+                name = targetHex;
+            }
+            searchedTargetId = to;
+            searchedTargetName = name;
+            String displayName = getString(R.string.add_friend_user_found, name);
+            postUi(() -> {
+                resultName.setText(displayName);
+                resultName.setVisibility(View.VISIBLE);
+                sendBtn.setEnabled(true);
+            });
+        } finally {
+            postUi(() -> {
+                progress.setVisibility(View.GONE);
+                searchBtn.setEnabled(true);
+            });
+        }
+    }
+
+    private void runSend(String host, int port, byte[] to, String targetName) {
+        postUi(() -> {
+            progress.setVisibility(View.VISIBLE);
+            sendBtn.setEnabled(false);
+        });
         try {
             if (!FriendZspHelper.ensureSession(this, host, port)) {
                 postUi(this::toastFailed);
@@ -74,30 +132,14 @@ public final class AddFriendActivity extends AppCompatActivity {
             }
             AuthCredentialStore creds = AuthCredentialStore.create(this);
             byte[] from = creds.getUserIdBytes();
-            byte[] to = AuthCredentialStore.hexToBytes(targetHex);
-            if (from.length != 16 || to.length != 16) {
-                postUi(
-                        () ->
-                                Toast.makeText(this, R.string.error_user_id_hex, Toast.LENGTH_SHORT)
-                                        .show());
-                return;
-            }
-            if (Arrays.equals(from, to)) {
-                postUi(
-                        () ->
-                                Toast.makeText(this, R.string.error_user_id_hex, Toast.LENGTH_SHORT)
-                                        .show());
-                return;
-            }
             for (byte[] fid : ZspSessionManager.get().friendListGet()) {
                 if (fid != null && fid.length == 16 && Arrays.equals(fid, to)) {
-                    postUi(
-                            () ->
-                                    Toast.makeText(
-                                                    this,
-                                                    R.string.add_friend_already_friend,
-                                                    Toast.LENGTH_SHORT)
-                                            .show());
+                    postUi(() ->
+                            Toast.makeText(
+                                            this,
+                                            R.string.add_friend_already_friend,
+                                            Toast.LENGTH_SHORT)
+                                    .show());
                     return;
                 }
             }
@@ -109,27 +151,25 @@ public final class AddFriendActivity extends AppCompatActivity {
             byte[] reqId = ZspSessionManager.get().friendRequestSend(wire);
             if (reqId != null && reqId.length >= 16) {
                 boolean duplicatePending = reqId.length >= 17 && reqId[16] != 0;
-                postUi(
-                        () -> {
-                            if (duplicatePending) {
-                                Toast.makeText(
-                                                this,
-                                                R.string.add_friend_duplicate_pending,
-                                                Toast.LENGTH_SHORT)
-                                        .show();
-                            } else {
-                                Toast.makeText(this, R.string.add_friend_ok, Toast.LENGTH_SHORT).show();
-                            }
-                        });
+                postUi(() -> {
+                    if (duplicatePending) {
+                        Toast.makeText(
+                                        this,
+                                        R.string.add_friend_duplicate_pending,
+                                        Toast.LENGTH_SHORT)
+                                .show();
+                    } else {
+                        Toast.makeText(this, R.string.add_friend_ok, Toast.LENGTH_SHORT).show();
+                    }
+                });
             } else {
                 postUi(this::toastFailed);
             }
         } finally {
-            postUi(
-                    () -> {
-                        progress.setVisibility(View.GONE);
-                        sendBtn.setEnabled(true);
-                    });
+            postUi(() -> {
+                progress.setVisibility(View.GONE);
+                sendBtn.setEnabled(true);
+            });
         }
     }
 
@@ -138,13 +178,12 @@ public final class AddFriendActivity extends AppCompatActivity {
     }
 
     private void postUi(Runnable r) {
-        runOnUiThread(
-                () -> {
-                    if (isFinishing()) {
-                        return;
-                    }
-                    r.run();
-                });
+        runOnUiThread(() -> {
+            if (isFinishing()) {
+                return;
+            }
+            r.run();
+        });
     }
 
     @Override
